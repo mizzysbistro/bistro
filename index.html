@@ -251,7 +251,7 @@ const clean=s=>String(s).replace(/[<>&"'`\\]/g,'').trim();
 const REASONS={void:['Customer cancelled','Wrong item ordered','Kitchen error or spoiled','Server mistake','Other'],refund:['Food quality complaint','Wrong order','Customer changed mind','Overcharged','Other'],disc:['Promo','Customer complaint','Manager comp','Staff meal','Other']};
 /* ===== Cloud account + cross-device sync ===== */
 const CLOUD_CFG_KEY='mizzy-cloud-config';
-let cloudClient=null,cloudUser=null,cloudBusy=false,cloudTimer=null,cloudInterval=null,cloudChannel=null,cloudApplying=false,cloudLastRemote=0,cloudLastSaved=0,cloudLastPayload='',cloudBooting=false,cloudDevice=(crypto&&crypto.randomUUID?crypto.randomUUID():String(Date.now())+'-'+Math.random().toString(36).slice(2));
+let cloudClient=null,cloudUser=null,cloudBusy=false,cloudTimer=null,cloudInterval=null,cloudChannel=null,cloudApplying=false,cloudRestoreReady=false,cloudLastRemote=0,cloudLastSaved=0,cloudLastPayload='',cloudBooting=false,cloudDevice=(crypto&&crypto.randomUUID?crypto.randomUUID():String(Date.now())+'-'+Math.random().toString(36).slice(2));
 function cloudCfg(){try{return JSON.parse(localStorage.getItem(CLOUD_CFG_KEY)||'null')}catch(e){return null}}
 function saveCloudCfg(c){try{localStorage.setItem(CLOUD_CFG_KEY,JSON.stringify(c))}catch(e){}}
 function cloudReady(){return !!(window.supabase&&cloudClient)}
@@ -266,10 +266,64 @@ async function cloudLogin(){if(!cloudCfg()){cloudSetup();return}if(!cloudClient)
 async function cloudDoLogin(){const e=$('#ce').value.trim(),p=$('#cp').value;if(!e||!p)return toast('Enter your email and password.');cloudBusy=true;const r=await cloudClient.auth.signInWithPassword({email:e,password:p});cloudBusy=false;if(r.error)return toast(r.error.message);closeModal();toast('Cloud account connected.');}
 async function cloudDoSignup(){const e=$('#ce').value.trim(),p=$('#cp').value;if(!e||p.length<6)return toast('Use an email and a password of at least 6 characters.');cloudBusy=true;const r=await cloudClient.auth.signUp({email:e,password:p});cloudBusy=false;if(r.error)return toast(r.error.message);if(r.data.session){closeModal();toast('Cloud account created and connected.')}else toast('Account created. Check your email to confirm it, then sign in.')}
 async function cloudSignOut(){if(!cloudClient)return;clearTimeout(cloudTimer);if(cloudInterval)clearInterval(cloudInterval);cloudInterval=null;if(cloudChannel){try{await cloudClient.removeChannel(cloudChannel)}catch(e){}cloudChannel=null}await cloudClient.auth.signOut();cloudUser=null;me=null;render();toast('Cloud account signed out.')}
-async function cloudSaveNow(silent){if(!cloudUser||!cloudClient||cloudApplying)return false;const d=snap(),now=new Date().toISOString();clearTimeout(cloudTimer);const payload=JSON.stringify(d);if(payload===cloudLastPayload)return true;cloudLastSaved=Date.parse(now);try{const r=await cloudClient.from('pos_data').upsert({user_id:cloudUser.id,data:d,updated_at:now},{onConflict:'user_id'});if(r.error)throw r.error;cloudLastPayload=payload;if(!silent)toast('☁️ Saved and synced.');return true}catch(e){if(!silent)toast('Cloud save failed. Your local copy is safe.');return false}}
-function cloudPush(d){if(!cloudUser||!cloudClient||cloudApplying)return;clearTimeout(cloudTimer);cloudTimer=setTimeout(()=>cloudSaveNow(true),100)}
-async function cloudSyncTick(){if(!cloudUser||!cloudClient||cloudApplying)return;const local=JSON.stringify(snap());if(local!==cloudLastPayload){await cloudSaveNow(true);return}try{const r=await cloudClient.from('pos_data').select('data,updated_at').eq('user_id',cloudUser.id).maybeSingle();if(r.error||!r.data||!r.data.data)return;const ts=Date.parse(r.data.updated_at||'')||0;if(ts>cloudLastRemote&&JSON.stringify(r.data.data)!==cloudLastPayload){cloudLastRemote=ts;cloudLastPayload=JSON.stringify(r.data.data);cloudApplying=true;try{quiet=true;apply(r.data.data,false);quiet=false;localStorage.setItem('mizzy3',JSON.stringify(snap()));}finally{cloudApplying=false}render();}}catch(e){}}
-async function cloudPull(silent){if(!cloudUser||!cloudClient)return;try{const r=await cloudClient.from('pos_data').select('data,updated_at').eq('user_id',cloudUser.id).maybeSingle();if(r.error)return;if(r.data&&r.data.data){const ts=Date.parse(r.data.updated_at||'')||0;cloudLastRemote=Math.max(cloudLastRemote,ts);cloudLastPayload=JSON.stringify(r.data.data);cloudApplying=true;try{quiet=true;apply(r.data.data,false);quiet=false;localStorage.setItem('mizzy3',JSON.stringify(snap()));}finally{cloudApplying=false}if(!silent)toast('Cloud data loaded.')}else await cloudSaveNow(true)}catch(e){}render()}
+async function cloudSaveNow(silent){if(!cloudUser||!cloudClient||cloudApplying||!cloudRestoreReady)return false; d=snap(),now=new Date().toISOString();clearTimeout(cloudTimer);const payload=JSON.stringify(d);if(payload===cloudLastPayload)return true;cloudLastSaved=Date.parse(now);try{const r=await cloudClient.from('pos_data').upsert({user_id:cloudUser.id,data:d,updated_at:now},{onConflict:'user_id'});if(r.error)throw r.error;cloudLastPayload=payload;if(!silent)toast('☁️ Saved and synced.');return true}catch(e){if(!silent)toast('Cloud save failed. Your local copy is safe.');return false}}
+function cloudPush(d){if(!cloudUser||!cloudClient||cloudApplying||!cloudRestoreReady)return;clearTimeout(cloudTimer);cloudTimer=setTimeout(()=>cloudSaveNow(true),100)}
+async function cloudSyncTick(){if(!cloudUser||!cloudClient||cloudApplying||!cloudRestoreReady)return;;const local=JSON.stringify(snap());if(local!==cloudLastPayload){await cloudSaveNow(true);return}try{const r=await cloudClient.from('pos_data').select('data,updated_at').eq('user_id',cloudUser.id).maybeSingle();if(r.error||!r.data||!r.data.data)return;const ts=Date.parse(r.data.updated_at||'')||0;if(ts>cloudLastRemote&&JSON.stringify(r.data.data)!==cloudLastPayload){cloudLastRemote=ts;cloudLastPayload=JSON.stringify(r.data.data);cloudApplying=true;try{quiet=true;apply(r.data.data,false);quiet=false;localStorage.setItem('mizzy3',JSON.stringify(snap()));}finally{cloudApplying=false}render();}}catch(e){}}
+JavaScript
+
+async function cloudPull(silent){
+  if(!cloudUser||!cloudClient)return false;
+  cloudRestoreReady=false;
+  try{
+    const r=await cloudClient.from('pos_data')
+      .select('data,updated_at')
+      .eq('user_id',cloudUser.id)
+      .maybeSingle();
+
+    if(r.error)throw r.error;
+
+    if(!r.data||!r.data.data){
+      if(!silent)toast('No cloud data found. Restore paused to protect local data.');
+      render();
+      return false;
+    }
+
+    const d=r.data.data;
+    if(!d.menu||
+       !Array.isArray(d.orders)||
+       !Array.isArray(d.kds)||
+       !d.tickets||
+       typeof d.tickets!=='object'||
+       Array.isArray(d.tickets)||
+       !Array.isArray(d.custs)){
+      throw new Error('Cloud data format is invalid. No data was changed.');
+    }
+
+    cloudApplying=true;
+    try{
+      quiet=true;
+      apply(d,false);
+      localStorage.setItem('mizzy3',JSON.stringify(snap()));
+      cloudLastRemote=Date.parse(r.data.updated_at||'')||0;
+      cloudLastPayload=JSON.stringify(d);
+    }finally{
+      quiet=false;
+      cloudApplying=false;
+    }
+
+    cloudRestoreReady=true;
+    if(!silent)toast('Cloud data restored successfully.');
+    return true;
+  }catch(e){
+    cloudRestoreReady=false;
+    console.error('Cloud restore failed:',e);
+    toast('Cloud restore failed. Automatic sync is paused.');
+    return false;
+  }finally{
+    render();
+  }
+}
+
 window.cloudCard=cloudCard;window.cloudPush=cloudPush;window.cloudSaveNow=cloudSaveNow;window.cloudLogin=cloudLogin;window.cloudSetup=cloudSetup;window.cloudSignOut=cloudSignOut;
 function calc(t){
 const sub=r2(t.lines.reduce((a,l)=>a+l.p*l.q,0)),claimed=new Set(),spl=[];
